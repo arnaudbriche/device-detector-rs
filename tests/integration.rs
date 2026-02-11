@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use device_detector::{ClientHints, DeviceDetector};
+use device_detector_rs::{ClientHints, DeviceDetector};
 use fixtures::fixtures;
 use serde::Deserialize;
 use std::collections::HashMap;

@@ -1,5 +1,5 @@
 [package]
-name = "device-detector"
+name = "device-detector-rs"
 version = "0.1.0"
 edition = "2021"
 description = "Rust port of Matomo's device-detector — parses User-Agent strings into bot/OS/client/device info using the Matomo YAML regex database"
