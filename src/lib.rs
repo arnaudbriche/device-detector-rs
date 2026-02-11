@@ -11,5 +11,5 @@ mod substitution;
 mod types;
 
 pub use device_detector::DeviceDetector;
-pub use error::Result;
+pub use error::{Error, Result};
 pub use types::*;
