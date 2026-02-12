@@ -3,7 +3,6 @@ mod device_detector;
 mod device_prefilter;
 mod error;
 mod helpers;
-mod literal;
 mod os_helpers;
 mod parser;
 mod parser_data;

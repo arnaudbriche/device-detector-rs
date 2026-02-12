@@ -1,4 +1,4 @@
-use fancy_regex::Captures;
+use crate::parser::Captures;
 use std::borrow::Cow;
 
 /// Simple semver-ish comparison: is `a < b`?  Compares dot-separated numeric
@@ -32,21 +32,7 @@ pub(crate) fn version_ge(a: &str, b: &str) -> bool {
 
 pub(crate) fn capture_or_empty<'a>(captures: &Captures<'a>, group: usize) -> Cow<'a, str> {
     captures
-        .get(group)
-        .map(|m| Cow::Borrowed(m.as_str()))
+        .get_str(group)
+        .map(Cow::Borrowed)
         .unwrap_or(Cow::Borrowed(""))
-}
-
-/// Quick regex match against a UA, using Matomo's boundary prefix + case-insensitive.
-pub(crate) fn ua_matches(ua: &str, pattern: &str) -> bool {
-    // This allocates a Regex per call.  For the handful of heuristic checks in
-    // parse() the cost is negligible, and it keeps the code straightforward.
-    let full = format!(
-        "(?i)(?:^|[^A-Z0-9_\\-]|[^A-Z0-9\\-]_|sprd\\-|MZ\\-)(?:{})",
-        pattern
-    );
-    fancy_regex::Regex::new(&full)
-        .ok()
-        .and_then(|re| re.is_match(ua).ok())
-        .unwrap_or(false)
 }

@@ -7,7 +7,9 @@ pub enum Error {
     #[error(transparent)]
     Regex(#[from] fancy_regex::Error),
     #[error(transparent)]
-    AhoCorasick(#[from] aho_corasick::BuildError),
+    RegexFilteredParse(#[from] regex_filtered::ParseError),
+    #[error(transparent)]
+    RegexFilteredBuild(#[from] regex_filtered::BuildError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

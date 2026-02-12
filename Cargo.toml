@@ -6,11 +6,11 @@ description = "Rust port of Matomo's device-detector — parses User-Agent strin
 license = "MIT"
 
 [dependencies]
-aho-corasick = "1"
 fancy-regex = "0.14"
 rayon = "1"
+regex = "1"
+regex-filtered = "0.2"
 indexmap = { version = "2", features = ["serde"] }
-regex-syntax = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = "2"

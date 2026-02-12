@@ -4,14 +4,65 @@ use super::error::Result;
 use super::helpers::*;
 use super::os_helpers::*;
 use super::parser::{
-    compile_regex, CompiledBrand, CompiledEntry, CompiledParser, DeviceBrandParser,
+    compile_regex, full_pattern, CompiledEntry, CompiledParser, DeviceBrandParser,
 };
 use super::parser_data::*;
 use super::substitution::substitute;
 use super::types::*;
+use fancy_regex::Regex;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::path::Path;
+
+/// Pre-compiled regexes for heuristic device-type checks in `parse_with_hints()`.
+/// Each field corresponds to one `ua_matches()` callsite; compiling them once at
+/// init time avoids ~16 regex compilations per lookup.
+struct HeuristicRegexes {
+    vr: Regex,
+    chrome_android: Regex,
+    mobile_elibom: Regex,
+    pad_apad: Regex,
+    android_tablet: Regex,
+    opera_tablet: Regex,
+    android_mobile: Regex,
+    touch: Regex,
+    puffin_desktop: Regex,
+    puffin_smartphone: Regex,
+    puffin_tablet: Regex,
+    opera_tv: Regex,
+    android_tv: Regex,
+    smart_tv_tizen: Regex,
+    tv_fragment: Regex,
+    desktop_fragment: Regex,
+}
+
+impl HeuristicRegexes {
+    fn compile() -> Result<Self> {
+        // Uses the same boundary prefix + case-insensitive wrapping as ua_matches().
+        let b = r"(?:^|[^A-Z0-9_\-]|[^A-Z0-9\-]_|sprd\-|MZ\-)";
+        let mk = |pattern: &str| -> Result<Regex> {
+            Ok(Regex::new(&format!("(?i){}(?:{})", b, pattern))?)
+        };
+        Ok(Self {
+            vr: mk(r"Android( [.0-9]+)?; Mobile VR;| VR ")?,
+            chrome_android: mk(r"Chrome/[.0-9]*")?,
+            mobile_elibom: mk(r"(?:Mobile|eliboM)")?,
+            pad_apad: mk(r"Pad/APad")?,
+            android_tablet: mk(r"Android( [.0-9]+)?; Tablet;|Tablet(?! PC)|.*\-tablet$")?,
+            opera_tablet: mk(r"Opera Tablet")?,
+            android_mobile: mk(r"Android( [.0-9]+)?; Mobile;|.*\-mobile$")?,
+            touch: mk("Touch")?,
+            puffin_desktop: mk(r"Puffin/(?:\d+[.\d]+)[LMW]D")?,
+            puffin_smartphone: mk(r"Puffin/(?:\d+[.\d]+)[AIFLW]P")?,
+            puffin_tablet: mk(r"Puffin/(?:\d+[.\d]+)[AILW]T")?,
+            opera_tv: mk(r"Opera TV Store| OMI/")?,
+            android_tv: mk(r"Andr0id|(?:Android(?: UHD)?|Google) TV|\(lite\) TV|BRAVIA|Firebolt| TV$")?,
+            smart_tv_tizen: mk(r"SmartTV|Tizen.+ TV .+$")?,
+            tv_fragment: mk(r"\(TV;")?,
+            desktop_fragment: mk(r"Desktop(?: (?:x(?:32|64)|WOW64))?;")?,
+        })
+    }
+}
 
 pub struct DeviceDetector {
     bot_parser: CompiledParser<BotData>,
@@ -35,6 +86,8 @@ pub struct DeviceDetector {
         bool,
         DeviceBrandParser<DeviceBrandData, DeviceModelData>,
     )>,
+    /// Pre-compiled heuristic regexes for device-type inference.
+    heuristic_regexes: HeuristicRegexes,
     /// Package-ID → app name (from `client/hints/apps.yml`).
     app_hints: db::HintMap,
     /// Package-ID → browser name (from `client/hints/browsers.yml`).
@@ -251,6 +304,8 @@ impl DeviceDetector {
         let app_hints: db::HintMap = load_yaml(&hints_dir.join("apps.yml"))?;
         let browser_hints: db::HintMap = load_yaml(&hints_dir.join("browsers.yml"))?;
 
+        let heuristic_regexes = HeuristicRegexes::compile()?;
+
         Ok(Self {
             bot_parser,
             os_parser,
@@ -263,6 +318,7 @@ impl DeviceDetector {
             engine_parser,
             vendor_fragment_parser,
             device_parsers,
+            heuristic_regexes,
             app_hints,
             browser_hints,
         })
@@ -403,14 +459,19 @@ impl DeviceDetector {
 
         // --- Device-type heuristics (Matomo DeviceDetector.php:936-1128) ---
 
+        let hr = &self.heuristic_regexes;
+
         // VR fragment → wearable
-        if device_type.is_none() && ua_matches(ua, r"Android( [.0-9]+)?; Mobile VR;| VR ") {
+        if device_type.is_none() && hr.vr.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Wearable);
         }
 
         // Chrome on Android: "Mobile"/"eliboM" → smartphone, else → tablet
-        if device_type.is_none() && is_android_family && ua_matches(ua, r"Chrome/[.0-9]*") {
-            if ua_matches(ua, r"(?:Mobile|eliboM)") {
+        if device_type.is_none()
+            && is_android_family
+            && hr.chrome_android.is_match(ua).unwrap_or(false)
+        {
+            if hr.mobile_elibom.is_match(ua).unwrap_or(false) {
                 device_type = Some(DeviceType::Smartphone);
             } else {
                 device_type = Some(DeviceType::Tablet);
@@ -418,20 +479,24 @@ impl DeviceDetector {
         }
 
         // Pad/APad → tablet
-        if device_type == Some(DeviceType::Smartphone) && ua_matches(ua, r"Pad/APad") {
+        if device_type == Some(DeviceType::Smartphone)
+            && hr.pad_apad.is_match(ua).unwrap_or(false)
+        {
             device_type = Some(DeviceType::Tablet);
         }
 
         // "Android; Tablet;" or "Opera Tablet" → tablet
         if device_type.is_none()
-            && (ua_matches(ua, r"Android( [.0-9]+)?; Tablet;|Tablet(?! PC)|.*\-tablet$")
-                || ua_matches(ua, r"Opera Tablet"))
+            && (hr.android_tablet.is_match(ua).unwrap_or(false)
+                || hr.opera_tablet.is_match(ua).unwrap_or(false))
         {
             device_type = Some(DeviceType::Tablet);
         }
 
         // "Android; Mobile;" → smartphone
-        if device_type.is_none() && ua_matches(ua, r"Android( [.0-9]+)?; Mobile;|.*\-mobile$") {
+        if device_type.is_none()
+            && hr.android_mobile.is_match(ua).unwrap_or(false)
+        {
             device_type = Some(DeviceType::Smartphone);
         }
 
@@ -463,24 +528,24 @@ impl DeviceDetector {
         if device_type.is_none()
             && (os_name == "Windows RT"
                 || (os_name == "Windows" && !os_version.is_empty() && version_ge(os_version, "8")))
-            && ua_matches(ua, "Touch")
+            && hr.touch.is_match(ua).unwrap_or(false)
         {
             device_type = Some(DeviceType::Tablet);
         }
 
         // Puffin heuristics
-        if device_type.is_none() && ua_matches(ua, r"Puffin/(?:\d+[.\d]+)[LMW]D") {
+        if device_type.is_none() && hr.puffin_desktop.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Desktop);
         }
-        if device_type.is_none() && ua_matches(ua, r"Puffin/(?:\d+[.\d]+)[AIFLW]P") {
+        if device_type.is_none() && hr.puffin_smartphone.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Smartphone);
         }
-        if device_type.is_none() && ua_matches(ua, r"Puffin/(?:\d+[.\d]+)[AILW]T") {
+        if device_type.is_none() && hr.puffin_tablet.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Tablet);
         }
 
         // Opera TV Store / OMI → tv
-        if ua_matches(ua, r"Opera TV Store| OMI/") {
+        if hr.opera_tv.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Tv);
         }
 
@@ -494,15 +559,13 @@ impl DeviceDetector {
         if !matches!(
             device_type,
             Some(DeviceType::Tv) | Some(DeviceType::Peripheral)
-        ) && ua_matches(
-            ua,
-            r#"Andr0id|(?:Android(?: UHD)?|Google) TV|\(lite\) TV|BRAVIA|Firebolt| TV$"#,
-        ) {
+        ) && hr.android_tv.is_match(ua).unwrap_or(false)
+        {
             device_type = Some(DeviceType::Tv);
         }
 
         // Tizen TV / SmartTV → tv
-        if device_type.is_none() && ua_matches(ua, r"SmartTV|Tizen.+ TV .+$") {
+        if device_type.is_none() && hr.smart_tv_tizen.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Tv);
         }
 
@@ -528,14 +591,14 @@ impl DeviceDetector {
         }
 
         // (TV; fragment → tv
-        if device_type.is_none() && ua_matches(ua, r"\(TV;") {
+        if device_type.is_none() && hr.tv_fragment.is_match(ua).unwrap_or(false) {
             device_type = Some(DeviceType::Tv);
         }
 
         // "Desktop" fragment → desktop
         if device_type != Some(DeviceType::Desktop)
             && ua.contains("Desktop")
-            && ua_matches(ua, r"Desktop(?: (?:x(?:32|64)|WOW64))?;")
+            && hr.desktop_fragment.is_match(ua).unwrap_or(false)
         {
             device_type = Some(DeviceType::Desktop);
         }
@@ -666,6 +729,7 @@ impl DeviceDetector {
             if !prefilter.matches(ua) {
                 continue;
             }
+            
             if let Some(m) = parser.match_first(ua) {
                 let brand_data = m.brand_data;
 
@@ -778,48 +842,55 @@ fn build_device_brand_parser(
     // Keep a copy of the raw brand regex strings for prefilter construction.
     let brand_regex_strings: Vec<String> = brand_items.iter().map(|(_, r, _)| r.clone()).collect();
 
-    // Compile brand + model regexes in parallel across brands.
-    let compiled_brands: Vec<CompiledBrand<DeviceBrandData, DeviceModelData>> = brand_items
-        .into_par_iter()
-        .map(|(brand_name, brand_regex_str, entry)| {
-            let brand_regex = compile_regex(&brand_regex_str)?;
+    // Compile model regexes in parallel across brands.
+    // Brand gate regexes are NOT compiled here — DeviceBrandParser::build()
+    // handles them via regex-filtered (fast path) or fancy_regex (fallback).
+    let built_items: Vec<(String, DeviceBrandData, Vec<CompiledEntry<DeviceModelData>>)> =
+        brand_items
+            .into_par_iter()
+            .map(|(brand_name, brand_regex_str, entry)| {
+                let device_type = entry
+                    .device
+                    .as_deref()
+                    .and_then(DeviceType::from_str)
+                    .or(Some(default_type));
 
-            let device_type = entry
-                .device
-                .as_deref()
-                .and_then(DeviceType::from_str)
-                .or(Some(default_type));
-
-            // Compile model regexes in parallel within each brand.
-            let model_entries: Vec<CompiledEntry<DeviceModelData>> = entry
-                .models
-                .unwrap_or_default()
-                .into_par_iter()
-                .map(|model| {
-                    let model_regex = compile_regex(&model.regex)?;
-                    let model_device_type = model.device.as_deref().and_then(DeviceType::from_str);
-                    Ok(CompiledEntry {
-                        regex: model_regex,
-                        data: DeviceModelData {
-                            brand: model.brand,
-                            model_template: model.model,
-                            device_type: model_device_type,
-                        },
+                // Compile model regexes in parallel within each brand.
+                let model_entries: Vec<CompiledEntry<DeviceModelData>> = entry
+                    .models
+                    .unwrap_or_default()
+                    .into_par_iter()
+                    .map(|model| {
+                        let model_regex = compile_regex(&model.regex)?;
+                        let model_device_type =
+                            model.device.as_deref().and_then(DeviceType::from_str);
+                        Ok(CompiledEntry {
+                            regex: model_regex,
+                            data: DeviceModelData {
+                                brand: model.brand,
+                                model_template: model.model,
+                                device_type: model_device_type,
+                            },
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>>>()?;
+                    .collect::<Result<Vec<_>>>()?;
 
-            Ok(CompiledBrand {
-                regex: brand_regex,
-                data: DeviceBrandData {
-                    brand: brand_name,
-                    model_template: entry.model,
-                    device_type,
-                },
-                models: model_entries,
+                let brand_full_pattern = full_pattern(&brand_regex_str);
+
+                Ok((
+                    brand_full_pattern,
+                    DeviceBrandData {
+                        brand: brand_name,
+                        model_template: entry.model,
+                        device_type,
+                    },
+                    model_entries,
+                ))
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?;
 
-    Ok((DeviceBrandParser::new(compiled_brands), brand_regex_strings))
+    Ok((
+        DeviceBrandParser::build(built_items)?,
+        brand_regex_strings,
+    ))
 }
